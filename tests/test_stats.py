@@ -1,0 +1,119 @@
+import unittest
+import asyncio
+import tempfile
+from pathlib import Path
+from datetime import date, datetime
+
+import nonebot
+nonebot.init()
+
+from send.config import SendConfig
+from send.models import ActivityRecord, ActivityScope
+from send.storage import ActivityStore
+from send.service import ActivityService
+from amia_core.identity import ExternalIdentityKey, ResolvedIdentity
+
+class TestSendStats(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test.db"
+        self.config = SendConfig(
+            db_path=self.db_path,
+            adapter_instance_id="test-instance",
+            bot_app_id="test-app",
+            cross_context_user_id_stable=True,
+            queue_size=10,
+            batch_size=1,
+            flush_interval_seconds=0.01,
+            resolver_timeout_seconds=0.01
+        )
+        self.service = ActivityService(self.config)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_service_stats_methods(self):
+        async def run_test():
+            await self.service.start()
+
+            scope = ActivityScope(
+                adapter_type="onebot.v11",
+                adapter_instance_id="test-instance",
+                bot_id="1111",
+                bot_app_id="test-app",
+                scope_verified=True
+            )
+            
+            # Insert records directly
+            records = [
+                ActivityRecord(
+                    activity_date=date.today(),
+                    activity_hour=12,
+                    scope=scope,
+                    context_type="group",
+                    context_id="2222",
+                    gensokyo_user_id="3333",
+                    canonical_user_id="qq3333",
+                    display_name="User3333",
+                    message_bytes=500,
+                    occurred_at=datetime.now()
+                ),
+                ActivityRecord(
+                    activity_date=date.today(),
+                    activity_hour=13,
+                    scope=scope,
+                    context_type="group",
+                    context_id="2222",
+                    gensokyo_user_id="4444",
+                    canonical_user_id=None,
+                    display_name="User4444",
+                    message_bytes=1500,
+                    occurred_at=datetime.now()
+                )
+            ]
+            
+            await self.service.store.upsert_batch(records)
+
+            # Test get_group_rank
+            rank = await self.service.get_group_rank("1111", "2222", date.today(), date.today())
+            self.assertEqual(len(rank), 2)
+            self.assertEqual(rank[0]["gensokyo_user_id"], "3333")
+
+            # Test get_group_dau
+            dau = await self.service.get_group_dau("1111", "2222", date.today())
+            self.assertEqual(dau["count"], 2)
+
+            # Test get_group_activity_summary
+            summary = await self.service.get_group_activity_summary("test-instance", "test-app", "2222", date.today(), date.today())
+            self.assertEqual(summary["message_count"], 2)
+            self.assertEqual(summary["total_bytes"], 2000)
+            self.assertEqual(summary["unique_users"], 2)
+
+            # Test get_user_activity
+            identity_key = ExternalIdentityKey("onebot.v11", "test-instance", "test-app", "3333")
+            identity = ResolvedIdentity(identity_key, "qq3333")
+            user_act = await self.service.get_user_activity(identity, date.today(), date.today())
+            self.assertEqual(user_act["message_count"], 1)
+            self.assertEqual(user_act["total_bytes"], 500)
+
+            # Test get_instance_active_users
+            active_u = await self.service.get_instance_active_users(date.today())
+            self.assertEqual(active_u["count"], 2)
+
+            # Test get_merged_dau
+            merged = await self.service.get_merged_dau(date.today())
+            self.assertEqual(merged["count"], 2)
+            self.assertEqual(merged["bound_count"], 1)
+            self.assertEqual(merged["unbound_count"], 1)
+
+            # Test get_admin_dashboard_data
+            dashboard = await self.service.get_admin_dashboard_data("1111", "day")
+            self.assertEqual(dashboard["total_messages"], 2)
+            self.assertEqual(dashboard["active_groups"], 1)
+
+            await self.service.stop()
+
+        asyncio.run(run_test())
+
+if __name__ == "__main__":
+    unittest.main()
