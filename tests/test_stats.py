@@ -7,10 +7,14 @@ from datetime import date, datetime
 import nonebot
 nonebot.init()
 
-from send.config import SendConfig
-from send.models import ActivityRecord, ActivityScope
-from send.storage import ActivityStore
-from send.service import ActivityService
+from plugin_loader import load_send_package
+
+load_send_package()
+
+from amia_plugin_send.config import SendConfig
+from amia_plugin_send.models import ActivityRecord, ActivityScope
+from amia_plugin_send.storage import ActivityStore
+from amia_plugin_send.service import ActivityService
 from amia_core.identity import ExternalIdentityKey, ResolvedIdentity
 
 class TestSendStats(unittest.TestCase):

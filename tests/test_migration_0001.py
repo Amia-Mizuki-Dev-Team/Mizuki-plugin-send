@@ -8,8 +8,12 @@ from pathlib import Path
 import nonebot
 nonebot.init()
 
-from send.storage import ActivityStore, LegacyDatabaseDetected
-from send.migrations.v0001_activity_v2 import dry_run, migrate
+from plugin_loader import load_send_package
+
+load_send_package()
+
+from amia_plugin_send.storage import ActivityStore, LegacyDatabaseDetected
+from amia_plugin_send.migrations.v0001_activity_v2 import dry_run, migrate
 
 class TestSendMigration(unittest.TestCase):
     def setUp(self):

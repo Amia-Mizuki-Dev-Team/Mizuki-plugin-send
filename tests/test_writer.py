@@ -7,10 +7,14 @@ from datetime import date, datetime
 import nonebot
 nonebot.init()
 
-from send.config import SendConfig
-from send.models import ActivityRecord, ActivityScope
-from send.storage import ActivityStore
-from send.writer import ActivityWriter
+from plugin_loader import load_send_package
+
+load_send_package()
+
+from amia_plugin_send.config import SendConfig
+from amia_plugin_send.models import ActivityRecord, ActivityScope
+from amia_plugin_send.storage import ActivityStore
+from amia_plugin_send.writer import ActivityWriter
 
 class TestSendWriter(unittest.TestCase):
     def setUp(self):
