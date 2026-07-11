@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime
@@ -49,10 +50,12 @@ async def migrate(
         return
 
     backup_path = db_path.with_name(
-        f"{db_path.name}.pre-v2.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
+        f"{db_path.name}.pre-v2.{datetime.now().strftime('%Y%m%d%H%M%S%f')}.bak"
     )
+    if backup_path.exists():
+        raise FileExistsError(f"migration backup already exists: {backup_path}")
     try:
-        await __import__("asyncio").to_thread(backup_sqlite, db_path, backup_path)
+        await asyncio.to_thread(backup_sqlite, db_path, backup_path)
         backup_db = sqlite3.connect(backup_path)
         try:
             if backup_path.stat().st_size == 0 or backup_db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -240,6 +243,13 @@ async def migrate(
                     target_total = (await cursor.fetchone())[0]
                 if source_total != target_total:
                     raise RuntimeError("migration validation failed for hourly_stats")
+            if tables.get("traffic_stats", {}).get("exists"):
+                async with db.execute("SELECT COALESCE(SUM(total_bytes), 0) FROM traffic_stats_legacy_bak") as cursor:
+                    source_total = (await cursor.fetchone())[0]
+                async with db.execute("SELECT COALESCE(SUM(total_bytes), 0) FROM legacy_daily_metrics WHERE source_table='traffic_stats'") as cursor:
+                    target_total = (await cursor.fetchone())[0]
+                if source_total != target_total:
+                    raise RuntimeError("migration validation failed for traffic_stats")
 
             # 4. Record migration status
             await db.execute(
