@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,14 @@ async def migrate(
     # If expected legacy tables do not exist, nothing to migrate
     if not any(t.get("exists") for t in tables.values()):
         return
+
+    backup_path = db_path.with_name(
+        f"{db_path.name}.pre-v2.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
+    )
+    try:
+        shutil.copy2(db_path, backup_path)
+    except OSError as exc:
+        raise RuntimeError(f"unable to create migration backup {backup_path}") from exc
 
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA busy_timeout=10000")
@@ -192,6 +201,17 @@ async def migrate(
                     """,
                     (adapter_instance_id, bot_id, bot_app_id),
                 )
+
+            # Verify message totals before recording the migration as applied.
+            for source in ("msg_stats", "private_stats"):
+                if not tables.get(source, {}).get("exists"):
+                    continue
+                async with db.execute(f"SELECT COALESCE(SUM(count), 0) FROM {source}_legacy_bak") as cursor:
+                    source_total = (await cursor.fetchone())[0]
+                async with db.execute("SELECT COALESCE(SUM(message_count), 0) FROM activity_daily WHERE legacy_source=?", (source,)) as cursor:
+                    target_total = (await cursor.fetchone())[0]
+                if source_total != target_total:
+                    raise RuntimeError(f"migration validation failed for {source}: {source_total} != {target_total}")
 
             # 4. Record migration status
             await db.execute(

@@ -195,8 +195,24 @@ class ActivityStore:
         if not self.db_path.exists():
             return {"ok": True, "tables": {}, "message": "no existing database"}
         expected = ("msg_stats", "private_stats", "hourly_stats", "traffic_stats")
-        result: dict[str, Any] = {"ok": True, "tables": {}}
+        result: dict[str, Any] = {"ok": True, "tables": {}, "db_path": str(self.db_path.resolve()), "file_size": self.db_path.stat().st_size}
         async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA integrity_check") as cursor:
+                integrity = await cursor.fetchone()
+            result["integrity_check"] = integrity[0] if integrity else "unknown"
+            if result["integrity_check"] != "ok":
+                result["ok"] = False
+                result["reason"] = "sqlite integrity_check failed"
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cursor:
+                names = {row[0] for row in await cursor.fetchall()}
+            result["backup_tables"] = sorted(name for name in names if name.endswith("_legacy_bak"))
+            result["new_tables"] = sorted(name for name in names if name in {"activity_daily", "activity_hourly", "legacy_daily_metrics", "schema_migrations"})
+            if result["backup_tables"]:
+                result["ok"] = False
+                result["reason"] = "legacy backup tables already exist"
+            if result["new_tables"] and any(name in names for name in expected):
+                result["ok"] = False
+                result["reason"] = "partial migration state detected"
             for table in expected:
                 async with db.execute(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", (table,)
