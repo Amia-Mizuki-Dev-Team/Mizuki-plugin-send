@@ -2,7 +2,7 @@
 
 `Amia-plugin-send` 是 Mizuki Bot 的消息活动统计插件。
 
-它负责监听 OneBot V11 消息事件、保存群聊与私聊活动数据，并通过 `amia-core` 注册 `StatsProvider("send")`，供个人资料、群活跃分析和管理报表使用。
+它监听 OneBot V11 消息事件，将群聊与私聊活动写入 SQLite，并通过 `amia-core` 注册 `StatsProvider("send")`，供个人资料、群活跃分析和管理报表使用。
 
 本插件不是消息发送层，也不负责欢迎、公告或业务消息转发。
 
@@ -26,7 +26,7 @@ StatsProvider("send")
 - 每日和小时级消息统计；
 - 群聊消息排行；
 - 群活跃人数；
-- 用户最近活动统计；
+- 用户最近活动；
 - Bot 实例活跃用户统计；
 - 管理员活动概览；
 - 绑定前后身份归并统计。
@@ -40,7 +40,10 @@ StatsProvider("send")
 - 通过 IdentityResolver 保存可选 canonical user ID；
 - 使用有界异步队列和批量写入降低 SQLite 压力；
 - 写入失败或队列溢出时保存 dead-letter；
-- 检测旧数据库结构后停止写入，不自动修改生产数据。
+- 检测旧数据库结构后停止正常写入；
+- 提供旧库 dry-run 和显式迁移工具；
+- 迁移前执行完整性检查、状态检查和 SQLite 一致性备份；
+- 迁移后校验消息、小时和流量总量。
 
 ## 用户指令
 
@@ -91,9 +94,9 @@ date
 - 群 DAU：指定群、指定日期内不同 `gensokyo_user_id`；
 - 用户活动：当前 `self_id` 内；
 - 实例活跃用户：仅在明确配置 AppID 且确认跨上下文 ID 稳定时启用；
-- merged DAU：使用 canonical 映射归并绑定前后记录，检测到冲突时返回不可用。
+- merged DAU：使用 canonical 映射归并绑定前后记录，检测冲突时返回不可用。
 
-所有日期范围使用半开区间：
+日期范围统一采用半开区间：
 
 ```text
 start_date <= date < end_date
@@ -117,16 +120,16 @@ AMIA_SEND_DEAD_LETTER_MAX_BYTES=5242880
 AMIA_TIMEZONE=Asia/Shanghai
 ```
 
-关键配置说明：
+说明：
 
 - `AMIA_SEND_BOT_APP_ID` 必须显式配置，插件不猜测本地配置文件；
 - `AMIA_SEND_CROSS_CONTEXT_USER_ID_STABLE` 只有确认 Gensokyo 跨群 ID 稳定时才能启用；
 - `AMIA_TIMEZONE` 决定自然日、月和年的边界；
-- dead-letter 默认与数据库放在同一目录。
+- dead-letter 默认与数据库位于同一目录。
 
 ## 数据库
 
-默认数据库：
+默认路径：
 
 ```text
 <插件目录>/data.db
@@ -138,8 +141,17 @@ AMIA_TIMEZONE=Asia/Shanghai
 activity_daily
 activity_hourly
 legacy_daily_metrics
+legacy_hourly_metrics
 schema_migrations
 ```
+
+说明：
+
+- `activity_daily`：具备明确用户和上下文语义的日统计；
+- `activity_hourly`：新版本产生的小时统计；
+- `legacy_daily_metrics`：无法安全映射为用户活动的旧日数据；
+- `legacy_hourly_metrics`：缺少可靠群/私聊上下文的旧小时数据；
+- `schema_migrations`：迁移状态。
 
 运行时使用：
 
@@ -148,18 +160,21 @@ schema_migrations
 - 批量 upsert；
 - 有界写入队列。
 
-以下文件属于运行数据，不应提交：
+运行文件：
 
 ```text
 data.db
 data.db-wal
 data.db-shm
 *.dead-letter.jsonl
+*.pre-v2.<timestamp>.bak
 ```
+
+均不得提交到 Git。
 
 ## 写入失败处理
 
-数据库写入会有限重试。重试失败或队列溢出时，记录会写入：
+数据库写入会有限重试。重试失败或队列溢出时，记录写入：
 
 ```text
 <data.db>.dead-letter.jsonl
@@ -176,11 +191,11 @@ last_failure_at
 last_failure_error
 ```
 
-消费者不应直接读取这些内部状态，后续可通过 HealthProvider 暴露必要诊断信息。
+消费者不应直接依赖这些内部字段。后续可以通过 HealthProvider 暴露必要诊断信息。
 
 ## amia-core 对接
 
-插件启动后注册：
+启动后注册：
 
 ```python
 registry.register_stats_provider(
@@ -190,7 +205,7 @@ registry.register_stats_provider(
 )
 ```
 
-消费者通过：
+消费者获取：
 
 ```python
 provider = registry.get_stats_provider("send")
@@ -209,7 +224,7 @@ get_merged_dau
 get_admin_dashboard_data
 ```
 
-调用方必须使用 `call_provider_safe()`，处理 Provider 缺失、异常和超时，不应直接查询 Send 的 SQLite。
+调用方应通过 `call_provider_safe()` 处理 Provider 缺失、异常和超时，不应直接读取 Send SQLite。
 
 ### Profile 对接
 
@@ -221,7 +236,7 @@ get_admin_dashboard_data
 
 ## IdentityResolver 对接
 
-Send 可以调用 `amia-core` 中已注册的 IdentityResolver，把：
+Send 可以调用 `amia-core` 中的 IdentityResolver，将：
 
 ```text
 self_id + gensokyo_user_id
@@ -233,7 +248,7 @@ self_id + gensokyo_user_id
 canonical_user_id
 ```
 
-Resolver 不存在、超时或失败时，消息记录仍可写入，只是不包含 canonical ID。
+Resolver 不存在、超时或失败时，消息仍可写入，只是不包含 canonical ID。
 
 Send 不直接修改 Gensokyo idmap，也不把昵称作为身份主键。
 
@@ -251,7 +266,7 @@ Profile 和 Group Insight 可以在 Send 缺失时启动，但只能返回降级
 
 ## 旧数据库迁移
 
-以下旧表不会在启动阶段自动迁移：
+旧表：
 
 ```text
 msg_stats
@@ -260,18 +275,71 @@ hourly_stats
 traffic_stats
 ```
 
-检测到只有旧结构时，插件会停止写入并保留原数据。
+插件启动不会自动迁移旧库。检测到旧结构时，正常写入会停止，避免新旧结构继续混合。
 
-生产迁移启用前必须完成：
+### dry-run 预检
 
-- 文件级备份；
+迁移前预检会检查：
+
+- 数据库是否存在；
 - `PRAGMA integrity_check`；
-- 部分迁移状态识别；
-- 已存在备份表时拒绝继续；
-- 迁移前后消息总量校验；
-- 失败注入和完整回滚测试。
+- 旧表是否存在；
+- `*_legacy_bak` 是否已存在；
+- 新旧表同时存在的部分迁移状态；
+- 数据库绝对路径和文件大小。
 
-这些条件未完成前，不要对生产 `data.db` 执行迁移。
+以下情况应拒绝迁移：
+
+- integrity check 不是 `ok`；
+- 已存在 legacy backup 表；
+- 检测到部分迁移状态；
+- 当前数据库不是预期目标文件。
+
+### 一致性备份
+
+迁移前使用 SQLite backup API 创建：
+
+```text
+<data.db>.pre-v2.<timestamp>.bak
+```
+
+该方式会复制已提交的 WAL 内容。备份完成后还会执行完整性检查。
+
+如果备份文件已存在、为空、无法创建或 integrity check 失败，迁移会停止。
+
+### 数据语义
+
+- `msg_stats` 和 `private_stats` 迁移到 `activity_daily`；
+- `hourly_stats` 缺少可靠上下文，因此进入 `legacy_hourly_metrics`；
+- `traffic_stats` 进入 `legacy_daily_metrics`；
+- 不会为了填满新表而伪造群号或上下文。
+
+### 迁移校验
+
+迁移记录状态前会校验：
+
+- 群消息总量；
+- 私聊消息总量；
+- 小时消息总量；
+- 流量字节总量。
+
+任一总量不一致都会抛出错误，不应把该次迁移标记为成功。
+
+### 生产执行要求
+
+现有代码已经具备主要安全预检和总量校验，但仍不代表可以未经演练直接修改生产库。
+
+生产迁移前必须：
+
+1. 停止 Bot 写入；
+2. 对生产库执行 dry-run；
+3. 在生产库副本上完成一次完整迁移；
+4. 核对统计总量和主要排行；
+5. 确认备份文件可以独立打开；
+6. 准备明确回滚步骤；
+7. 最后才对生产文件执行迁移。
+
+当前不会在插件启动阶段自动执行迁移。
 
 ## 测试
 
@@ -288,12 +356,15 @@ python -m unittest discover -s src/plugins/Amia-plugin-send/tests -v
 - 日、月、年半开区间；
 - canonical 身份归并；
 - dead-letter 写入；
-- 旧库检测和迁移预检；
-- Provider 注册和消费。
+- dry-run 的完整性和部分迁移检测；
+- SQLite 一致性备份；
+- 群、私聊、小时和流量迁移总量；
+- Provider 注册和消费；
+- 失败后的数据库状态和回滚行为。
 
 ## 已知限制
 
-- 生产数据库迁移尚未达到可执行标准；
+- 生产迁移尚未在真实生产副本上完成演练；
 - 跨群实例 DAU 依赖明确 AppID 和稳定用户 ID；
 - 当前未提供完整 HealthProvider；
 - 尚未完成所有插件同时加载的集成测试。
@@ -302,7 +373,7 @@ python -m unittest discover -s src/plugins/Amia-plugin-send/tests -v
 
 - 不直接修改 Gensokyo idmap；
 - 不用昵称作为身份主键；
-- 不自动迁移生产数据库；
-- 不把未验证实例 DAU 描述成准确值；
-- 不提交数据库、WAL、SHM 和 dead-letter；
+- 不在启动阶段自动迁移生产数据库；
+- 不把未验证实例 DAU描述成准确值；
+- 不提交数据库、WAL、SHM、备份和 dead-letter；
 - 当前仓库尚未确定公开许可证。
