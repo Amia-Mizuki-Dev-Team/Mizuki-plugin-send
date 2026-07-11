@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
@@ -11,12 +12,13 @@ from .service import ActivityService
 
 
 def _range(mode: str) -> tuple[date, date]:
-    today = date.today()
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    end_exclusive = today + timedelta(days=1)
     if mode == "month":
-        return today.replace(day=1), today
+        return today.replace(day=1), end_exclusive
     if mode == "year":
-        return today.replace(month=1, day=1), today
-    return today, today
+        return today.replace(month=1, day=1), end_exclusive
+    return today, end_exclusive
 
 
 def _format_bytes(value: int) -> str:
